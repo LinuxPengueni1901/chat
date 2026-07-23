@@ -50,7 +50,7 @@ export default function ChatApp() {
   const [groupNameInput, setGroupNameInput] = useState('')
   const [selectedFriendToInvite, setSelectedFriendToInvite] = useState('')
 
-  // GRUP ÜYELERİ MODALI
+  // GRUP ÜYELERİ MODALI VE İÇERİK KONTROLÜ
   const [groupMembers, setGroupMembers] = useState<string[]>([])
   const [showMembersModal, setShowMembersModal] = useState(false)
 
@@ -164,6 +164,27 @@ export default function ChatApp() {
     }
   }
 
+  // AKTİF GRUP DEĞİŞTİĞİNDE ÜYELERİ YÜKLE
+  useEffect(() => {
+    if (!activeGroup) {
+      setGroupMembers([])
+      return
+    }
+
+    const loadActiveGroupMembers = async () => {
+      const { data } = await supabase
+        .from('group_members')
+        .select('user_name')
+        .eq('group_id', activeGroup.id)
+
+      if (data) {
+        setGroupMembers(data.map(m => m.user_name))
+      }
+    }
+
+    loadActiveGroupMembers()
+  }, [activeGroup])
+
   useEffect(() => {
     if (!isJoined) return
 
@@ -229,17 +250,29 @@ export default function ChatApp() {
     }
   }
 
-  // GRUP ÜYELERİNİ ÇEKME
-  const fetchGroupMembers = async () => {
+  // GRUPTAN ÜYE ÇIKARMA
+  const removeMemberFromGroup = async (memberToRemove: string) => {
     if (!activeGroup) return
-    const { data } = await supabase
-      .from('group_members')
-      .select('user_name')
-      .eq('group_id', activeGroup.id)
 
-    if (data) {
-      setGroupMembers(data.map(m => m.user_name))
-      setShowMembersModal(true)
+    if (memberToRemove === activeGroup.created_by) {
+      alert('Grup kurucusu gruptan çıkarılamaz!')
+      return
+    }
+
+    const confirmRemove = confirm(`${memberToRemove} kullanıcısını gruptan çıkarmak istediğine emin misin?`)
+    if (!confirmRemove) return
+
+    const { error } = await supabase
+      .from('group_members')
+      .delete()
+      .eq('group_id', activeGroup.id)
+      .eq('user_name', memberToRemove)
+
+    if (!error) {
+      alert(`${memberToRemove} gruptan çıkarıldı!`)
+      setGroupMembers(prev => prev.filter(m => m !== memberToRemove))
+    } else {
+      alert('Üye çıkarılırken bir hata oluştu: ' + error.message)
     }
   }
 
@@ -344,26 +377,42 @@ export default function ChatApp() {
   const deleteGroup = async () => {
     if (!activeGroup) return
 
-    const confirmDelete = confirm(`"${activeGroup.name}" grubunu silmek istediğine emin misin? Bu işlem geri alınamaz!`)
+    const confirmDelete = confirm(`"${activeGroup.name}" grubunu KAPATMAK ve silmek istediğine emin misin? Tüm mesajlar silinecek!`)
     if (!confirmDelete) return
 
     const { error } = await supabase.from('chat_groups').delete().eq('id', activeGroup.id)
 
     if (error) {
-      alert('Grup silinirken bir hata oluştu: ' + error.message)
+      alert('Grup kapatılırken bir hata oluştu: ' + error.message)
     } else {
-      alert('Grup başarıyla silindi! 🗑️')
+      alert('Grup başarıyla kapatıldı ve silindi! 🗑️')
       setActiveGroup(null)
       loadGroups()
     }
   }
 
+  // GRUBA ARKADAŞ EKLEME
   const inviteFriendToGroup = async () => {
     if (!activeGroup || !selectedFriendToInvite) return
-    const { error } = await supabase.from('group_members').insert([{ group_id: activeGroup.id, user_name: selectedFriendToInvite }])
-    if (!error) {
-      alert(`${selectedFriendToInvite} gruba eklendi! 🎉`)
+
+    // 1. Zaten grupta var mı kontrolü
+    if (groupMembers.includes(selectedFriendToInvite)) {
+      alert(`"${selectedFriendToInvite}" zaten grupta var! ⚠️`)
       setSelectedFriendToInvite('')
+      return
+    }
+
+    // 2. Gruba Ekle
+    const { error: insertErr } = await supabase.from('group_members').insert([
+      { group_id: activeGroup.id, user_name: selectedFriendToInvite }
+    ])
+
+    if (!insertErr) {
+      alert(`${selectedFriendToInvite} gruba başarıyla eklendi! 🎉`)
+      setGroupMembers(prev => [...prev, selectedFriendToInvite])
+      setSelectedFriendToInvite('')
+    } else {
+      alert('Zaten grupta var veya bir hata oluştu: ' + insertErr.message)
     }
   }
 
@@ -446,7 +495,7 @@ export default function ChatApp() {
               />
             </div>
 
-            <button type="submit" className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 rounded-xl transition text-sm">
+            <button type="submit" className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 rounded-xl transition text-sm cursor-pointer select-none">
               {authMode === 'login' ? 'Giriş Yap 🚀' : 'Kayıt Ol 📝'}
             </button>
           </form>
@@ -478,7 +527,7 @@ export default function ChatApp() {
   return (
     <main className="flex h-screen bg-gray-950 text-white overflow-hidden relative">
       
-      {/* ÜYE LİSTESİ MODALI (AÇILIR PENCERE) */}
+      {/* ÜYE LİSTESİ VE ÇIKARMA MODALI */}
       {showMembersModal && activeGroup && (
         <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-gray-900 border border-gray-800 rounded-2xl w-full max-w-sm p-6 space-y-4 shadow-2xl">
@@ -494,20 +543,32 @@ export default function ChatApp() {
 
             <div className="max-h-60 overflow-y-auto space-y-3 divide-y divide-gray-800/50">
               {groupMembers.map((member) => (
-                <div key={member} className="flex items-center gap-3 pt-2">
-                  <div className="w-8 h-8 rounded-full bg-gray-800 border border-gray-700 overflow-hidden flex items-center justify-center font-bold text-xs text-blue-400">
-                    {userAvatars[member] ? (
-                      <img src={userAvatars[member]} alt={member} className="w-full h-full object-cover" />
-                    ) : (
-                      member[0]?.toUpperCase()
-                    )}
+                <div key={member} className="flex items-center justify-between pt-2">
+                  <div className="flex items-center gap-3">
+                    <div className="w-8 h-8 rounded-full bg-gray-800 border border-gray-700 overflow-hidden flex items-center justify-center font-bold text-xs text-blue-400">
+                      {userAvatars[member] ? (
+                        <img src={userAvatars[member]} alt={member} className="w-full h-full object-cover" />
+                      ) : (
+                        member[0]?.toUpperCase()
+                      )}
+                    </div>
+                    <div>
+                      <span className="font-semibold text-sm text-gray-200 block">{member}</span>
+                      {member === activeGroup.created_by && (
+                        <span className="text-[10px] text-amber-400 bg-amber-400/10 px-1.5 py-0.5 rounded border border-amber-400/20">👑 Kurucu</span>
+                      )}
+                    </div>
                   </div>
-                  <div className="flex-1">
-                    <span className="font-semibold text-sm text-gray-200 block">{member}</span>
-                    {member === activeGroup.created_by && (
-                      <span className="text-[10px] text-amber-400 bg-amber-400/10 px-1.5 py-0.5 rounded border border-amber-400/20">👑 Kurucu</span>
-                    )}
-                  </div>
+
+                  {/* Sadece Grup Kurucusu Üyeleri Çıkarabilir */}
+                  {activeGroup.created_by === userName && member !== userName && (
+                    <button
+                      onClick={() => removeMemberFromGroup(member)}
+                      className="bg-red-500/10 hover:bg-red-600 border border-red-500/30 text-red-400 hover:text-white px-2.5 py-1 rounded text-xs transition font-semibold"
+                    >
+                      Çıkar ❌
+                    </button>
+                  )}
                 </div>
               ))}
             </div>
@@ -524,7 +585,6 @@ export default function ChatApp() {
 
       {/* SOL PANEL */}
       <aside className="w-80 border-r border-gray-800 bg-gray-900 flex flex-col">
-        {/* Profil Bilgisi ve Çıkış Yap */}
         <div className="p-4 border-b border-gray-800 flex justify-between items-center bg-gray-900/50">
           <div className="flex items-center gap-3">
             <div className="relative group w-10 h-10 rounded-full overflow-hidden bg-blue-600/30 border border-blue-500/50 flex items-center justify-center font-bold text-blue-400">
@@ -646,29 +706,39 @@ export default function ChatApp() {
               {/* GRUP KONTROLLERİ */}
               {activeTab === 'groups' && activeGroup && (
                 <div className="flex items-center gap-2">
-                  {/* ÜYELERİ GÖR BUTONU */}
                   <button 
-                    onClick={fetchGroupMembers} 
+                    onClick={() => setShowMembersModal(true)} 
                     className="bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-200 px-3 py-1.5 text-xs rounded font-semibold transition flex items-center gap-1"
                   >
-                    👥 Üyeler
+                    👥 Üyeler ({groupMembers.length})
                   </button>
 
-                  <select value={selectedFriendToInvite} onChange={(e) => setSelectedFriendToInvite(e.target.value)} className="bg-gray-800 border border-gray-700 text-xs rounded p-1.5 text-white focus:outline-none">
-                    <option value="">-- Arkadaş Seç --</option>
-                    {friends.map(f => (
-                      <option key={f} value={f}>{f}</option>
-                    ))}
-                  </select>
-
-                  <button onClick={inviteFriendToGroup} className="bg-blue-600 hover:bg-blue-500 px-3 py-1.5 text-xs rounded font-semibold transition">
-                    Gruba Ekle
-                  </button>
-
+                  {/* Sadece Grup Kurucusu Üye Ekleyebilir ve Grubu Kapatabilir */}
                   {activeGroup.created_by === userName && (
-                    <button onClick={deleteGroup} className="bg-red-600/20 hover:bg-red-600 border border-red-500/50 text-red-400 hover:text-white px-3 py-1.5 text-xs rounded font-semibold transition">
-                      🗑️ Grubu Sil
-                    </button>
+                    <>
+                      {/* Sadece HENÜZ grupta OLMAMAYAN arkadaşları listede göster */}
+                      <select 
+                        value={selectedFriendToInvite} 
+                        onChange={(e) => setSelectedFriendToInvite(e.target.value)} 
+                        className="bg-gray-800 border border-gray-700 text-xs rounded p-1.5 text-white focus:outline-none"
+                      >
+                        <option value="">-- Arkadaş Seç --</option>
+                        {friends
+                          .filter(f => !groupMembers.includes(f))
+                          .map(f => (
+                            <option key={f} value={f}>{f}</option>
+                          ))
+                        }
+                      </select>
+
+                      <button onClick={inviteFriendToGroup} className="bg-blue-600 hover:bg-blue-500 px-3 py-1.5 text-xs rounded font-semibold transition">
+                        Gruba Ekle
+                      </button>
+
+                      <button onClick={deleteGroup} className="bg-red-600/20 hover:bg-red-600 border border-red-500/50 text-red-400 hover:text-white px-3 py-1.5 text-xs rounded font-semibold transition">
+                        🗑️ Grubu Kapat
+                      </button>
+                    </>
                   )}
                 </div>
               )}
@@ -701,7 +771,7 @@ export default function ChatApp() {
             <footer className="p-4 bg-gray-900 border-t border-gray-800">
               <form onSubmit={sendMessage} className="flex gap-2">
                 <input type="text" placeholder="Bir mesaj yazın..." value={text} onChange={(e) => setText(e.target.value)} className="flex-1 p-3 bg-gray-800 text-white rounded-xl border border-gray-700 focus:outline-none focus:border-blue-500 text-sm" />
-                <button type="submit" className="bg-blue-600 hover:bg-blue-500 text-white px-6 py-3 rounded-xl text-sm font-semibold">Gönder</button>
+                <button type="submit" className="bg-blue-600 hover:bg-blue-500 text-white px-6 py-3 rounded-xl text-sm font-semibold select-none cursor-pointer">Gönder</button>
               </form>
             </footer>
           </>
