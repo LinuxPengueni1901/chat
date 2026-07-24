@@ -23,6 +23,15 @@ interface Message {
   created_at: string
 }
 
+type UserRole = 'admin' | 'moderator' | 'user'
+
+interface UserItem {
+  id: string
+  user_name: string
+  email: string
+  role: UserRole
+}
+
 export default function ChatApp() {
   // Cihaz Tipi Tespiti (User-Agent Kontrolü)
   const [isMobileDevice, setIsMobileDevice] = useState(false)
@@ -38,6 +47,8 @@ export default function ChatApp() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [userName, setUserName] = useState('')
+  const [userRole, setUserRole] = useState<UserRole>('user')
+  const [userRolesMap, setUserRolesMap] = useState<Record<string, UserRole>>({})
   const [authError, setAuthError] = useState<string | null>(null)
   const [showRedirectToLogin, setShowRedirectToLogin] = useState(false)
 
@@ -46,6 +57,12 @@ export default function ChatApp() {
   const [myAvatar, setMyAvatar] = useState<string | null>(null)
   const [userAvatars, setUserAvatars] = useState<Record<string, string>>({})
   const [uploading, setUploading] = useState(false)
+
+  // ADMIN PANELİ VE TOPLU MESAJ DURUMLARI
+  const [showAdminModal, setShowAdminModal] = useState(false)
+  const [allUsersList, setAllUsersList] = useState<UserItem[]>([])
+  const [broadcastText, setBroadcastText] = useState('')
+  const [sendingBroadcast, setSendingBroadcast] = useState(false)
 
   // Sekme Değişimi & Chat Durumları
   const [activeTab, setActiveTab] = useState<'dms' | 'groups' | 'requests'>('dms')
@@ -71,6 +88,19 @@ export default function ChatApp() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
+  // Tüm kullanıcıların rollerini yükleme
+  const loadUserRoles = async () => {
+    const { data } = await supabase.from('users').select('id, user_name, email, role')
+    if (data) {
+      const roleMap: Record<string, UserRole> = {}
+      data.forEach((u) => {
+        if (u.role) roleMap[u.user_name] = u.role as UserRole
+      })
+      setUserRolesMap(roleMap)
+      setAllUsersList(data as UserItem[])
+    }
+  }
+
   // --- AUTH İŞLEMLERİ ---
 
   const handleRegister = async (e: React.FormEvent) => {
@@ -80,6 +110,11 @@ export default function ChatApp() {
 
     const cleanEmail = email.trim().toLowerCase()
     const cleanUserName = userName.trim()
+
+    if (cleanUserName.toLowerCase() === 'ultichat') {
+      setAuthError('"UltiChat" ismi korumalı resmi sistem adıdır, alınamaz!')
+      return
+    }
 
     if (!cleanEmail || !password.trim() || !cleanUserName) {
       setAuthError('Lütfen tüm alanları doldurun!')
@@ -101,7 +136,7 @@ export default function ChatApp() {
       }
 
       const { error: insertError } = await supabase.from('users').insert([
-        { email: cleanEmail, password: password, user_name: cleanUserName }
+        { email: cleanEmail, password: password, user_name: cleanUserName, role: 'user' }
       ])
 
       if (insertError) throw insertError
@@ -130,6 +165,7 @@ export default function ChatApp() {
       setAuthError('E-posta veya şifre hatalı!')
     } else {
       setUserName(data[0].user_name)
+      setUserRole(data[0].role || 'user')
       setIsJoined(true)
     }
   }
@@ -137,11 +173,13 @@ export default function ChatApp() {
   const handleLogout = () => {
     setIsJoined(false)
     setUserName('')
+    setUserRole('user')
     setEmail('')
     setPassword('')
     setActiveDM(null)
     setActiveGroup(null)
     setMessages([])
+    setShowAdminModal(false)
   }
 
   // --- SOHBET VE PROFİL MANTIĞI ---
@@ -197,6 +235,7 @@ export default function ChatApp() {
     if (!isJoined) return
 
     loadProfiles()
+    loadUserRoles()
 
     const loadFriendsAndRequests = async () => {
       const { data: reqs } = await supabase
@@ -212,10 +251,16 @@ export default function ChatApp() {
         .eq('status', 'accepted')
         .or(`sender_name.eq.${userName},receiver_name.eq.${userName}`)
 
+      let list: string[] = []
       if (accepted) {
-        const list = accepted.map(r => r.sender_name === userName ? r.receiver_name : r.sender_name)
-        setFriends(Array.from(new Set(list)))
+        list = accepted.map(r => r.sender_name === userName ? r.receiver_name : r.sender_name)
       }
+
+      if (userName !== 'UltiChat' && !list.includes('UltiChat')) {
+        list.push('UltiChat')
+      }
+
+      setFriends(Array.from(new Set(list)))
     }
 
     loadFriendsAndRequests()
@@ -258,10 +303,88 @@ export default function ChatApp() {
     }
   }
 
+  // YETKİ KONTROLLERİ
+  const isGroupOwner = activeGroup?.created_by === userName
+  const isAdmin = userRole === 'admin'
+  const isModerator = userRole === 'moderator'
+  const canManageGroup = isGroupOwner || isAdmin || isModerator
+  const isSystemAccount = userName === 'UltiChat'
+
+  // ADMIN İŞLEMLERİ: ROL DEĞİŞTİRME, KULLANICI SİLME & TOPLU DUYURU
+  const changeUserRole = async (targetUser: string, newRole: UserRole) => {
+    if (!isAdmin) {
+      alert('Sadece Admin kullanıcıların rolünü değiştirebilir!')
+      return
+    }
+
+    const { error } = await supabase.from('users').update({ role: newRole }).eq('user_name', targetUser)
+    if (!error) {
+      alert(`${targetUser} kullanıcısının rolü "${newRole.toUpperCase()}" yapıldı! 🎉`)
+      setUserRolesMap(prev => ({ ...prev, [targetUser]: newRole }))
+      setAllUsersList(prev => prev.map(u => u.user_name === targetUser ? { ...u, role: newRole } : u))
+    } else {
+      alert('Rol değiştirilirken hata oluştu: ' + error.message)
+    }
+  }
+
+  const deleteUserByAdmin = async (targetUserId: string, targetUserName: string) => {
+    if (!isAdmin) return
+    if (targetUserName === 'UltiChat') {
+      alert('Resmi sistem hesabı silinemez!')
+      return
+    }
+
+    const confirmDelete = confirm(`"${targetUserName}" kullanıcısını sistemden tamamen silmek istediğine emin misin?`)
+    if (!confirmDelete) return
+
+    const { error } = await supabase.from('users').delete().eq('id', targetUserId)
+    if (!error) {
+      alert(`${targetUserName} kullanıcı hesabı silindi! 🗑️`)
+      setAllUsersList(prev => prev.filter(u => u.id !== targetUserId))
+      loadUserRoles()
+    } else {
+      alert('Silme işlemi başarısız: ' + error.message)
+    }
+  }
+
+  // ADMIN PANELİNDEN TÜM ÜYELERE TOPLU MESAJ GÖNDERME
+  const handleAdminBroadcast = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!broadcastText.trim()) return
+
+    try {
+      setSendingBroadcast(true)
+      const { data: allUsers } = await supabase.from('users').select('user_name')
+
+      if (allUsers && allUsers.length > 0) {
+        const dmsToInsert = allUsers
+          .filter(u => u.user_name !== 'UltiChat')
+          .map(u => ({
+            sender_name: 'UltiChat',
+            receiver_name: u.user_name,
+            content: broadcastText.trim()
+          }))
+
+        const { error } = await supabase.from('direct_messages').insert(dmsToInsert)
+
+        if (!error) {
+          alert(`📢 Toplu duyuru ${dmsToInsert.length} kullanıcıya başarıyla ulaştırıldı! 🎉`)
+          setBroadcastText('')
+        } else {
+          throw error
+        }
+      }
+    } catch (err: any) {
+      alert('Toplu mesaj gönderilirken hata oluştu: ' + err.message)
+    } finally {
+      setSendingBroadcast(false)
+    }
+  }
+
   const removeMemberFromGroup = async (memberToRemove: string) => {
     if (!activeGroup) return
 
-    if (memberToRemove === activeGroup.created_by) {
+    if (memberToRemove === activeGroup.created_by && !isAdmin) {
       alert('Grup kurucusu gruptan çıkarılamaz!')
       return
     }
@@ -383,6 +506,11 @@ export default function ChatApp() {
   const deleteGroup = async () => {
     if (!activeGroup) return
 
+    if (!isGroupOwner && !isAdmin) {
+      alert('Sadece Grup Kurucusu veya Sistem Admini grubu silebilir!')
+      return
+    }
+
     const confirmDelete = confirm(`"${activeGroup.name}" grubunu KAPATMAK ve silmek istediğine emin misin? Tüm mesajlar silinecek!`)
     if (!confirmDelete) return
 
@@ -419,12 +547,33 @@ export default function ChatApp() {
     }
   }
 
+  // MESAJ GÖNDERME
   const sendMessage = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!text.trim()) return
     const currentText = text
     setText('')
+
+    if (isSystemAccount) {
+      const { data: allUsers } = await supabase.from('users').select('user_name')
+      if (allUsers) {
+        const dmsToInsert = allUsers
+          .filter(u => u.user_name !== 'UltiChat')
+          .map(u => ({
+            sender_name: 'UltiChat',
+            receiver_name: u.user_name,
+            content: currentText
+          }))
+        await supabase.from('direct_messages').insert(dmsToInsert)
+      }
+      return
+    }
+
     if (activeTab === 'dms' && activeDM) {
+      if (activeDM === 'UltiChat') {
+        alert('UltiChat resmi sistem hesabıdır. Bu hesaba mesaj atılamaz!')
+        return
+      }
       await supabase.from('direct_messages').insert([{ sender_name: userName, receiver_name: activeDM, content: currentText }])
     } else if (activeTab === 'groups' && activeGroup) {
       await supabase.from('group_messages').insert([{ group_id: activeGroup.id, sender_name: userName, content: currentText }])
@@ -437,6 +586,20 @@ export default function ChatApp() {
   }
 
   const hasActiveChat = (activeTab === 'dms' && activeDM) || (activeTab === 'groups' && activeGroup)
+
+  // ROL ROZETİ BİLEŞENİ
+  const renderRoleBadge = (targetUserName?: string, roleName?: UserRole) => {
+    if (targetUserName === 'UltiChat') {
+      return <span className="text-[9px] bg-purple-500/20 text-purple-300 border border-purple-500/40 px-1.5 py-0.5 rounded font-bold shadow-sm">⚡ OFFICIAL</span>
+    }
+    if (roleName === 'admin') {
+      return <span className="text-[9px] bg-red-500/20 text-red-400 border border-red-500/30 px-1.5 py-0.5 rounded font-bold shadow-sm">👑 ADMIN</span>
+    }
+    if (roleName === 'moderator') {
+      return <span className="text-[9px] bg-amber-500/20 text-amber-400 border border-amber-500/30 px-1.5 py-0.5 rounded font-bold shadow-sm">🛡️ MOD</span>
+    }
+    return null
+  }
 
   // A) GİRİŞ / KAYIT EKRANI
   if (!isJoined) {
@@ -536,55 +699,154 @@ export default function ChatApp() {
   return (
     <main className="flex h-dvh bg-gray-950 text-white overflow-hidden relative">
       
-      {/* ÜYE LİSTESİ VE ÇIKARMA MODALI */}
-      {showMembersModal && activeGroup && (
-        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-gray-900 border border-gray-800 rounded-2xl w-full max-w-sm p-5 sm:p-6 space-y-4 shadow-2xl">
+      {/* 👑 ADMIN PANELİ MODALI */}
+      {showAdminModal && isAdmin && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-md z-50 flex items-center justify-center p-4">
+          <div className="bg-gray-900 border border-red-500/30 rounded-2xl w-full max-w-xl p-5 sm:p-6 space-y-5 shadow-2xl">
             <div className="flex justify-between items-center border-b border-gray-800 pb-3">
-              <h3 className="font-bold text-base sm:text-lg text-blue-400">👥 {activeGroup.name} Üyeleri</h3>
-              <button 
-                onClick={() => setShowMembersModal(false)}
-                className="text-gray-400 hover:text-white text-xl font-bold p-1"
-              >
-                ✕
-              </button>
+              <div className="flex items-center gap-2">
+                <span className="text-xl">⚡</span>
+                <h3 className="font-bold text-lg text-red-400">Sistem Yönetim Paneli (Admin)</h3>
+              </div>
+              <button onClick={() => setShowAdminModal(false)} className="text-gray-400 hover:text-white text-xl font-bold p-1">✕</button>
             </div>
 
-            <div className="max-h-60 overflow-y-auto space-y-3 divide-y divide-gray-800/50">
-              {groupMembers.map((member) => (
-                <div key={member} className="flex items-center justify-between pt-2">
-                  <div className="flex items-center gap-3">
-                    <div className="w-8 h-8 rounded-full bg-gray-800 border border-gray-700 overflow-hidden flex items-center justify-center font-bold text-xs text-blue-400">
-                      {userAvatars[member] ? (
-                        <img src={userAvatars[member]} alt={member} className="w-full h-full object-cover" />
-                      ) : (
-                        member[0]?.toUpperCase()
-                      )}
+            {/* TOPLU MESAJ / DUYURU ALANI */}
+            <div className="bg-purple-950/40 border border-purple-500/30 p-4 rounded-xl space-y-3">
+              <div className="flex items-center justify-between">
+                <h4 className="font-bold text-xs text-purple-300 uppercase tracking-wider flex items-center gap-1.5">
+                  <span>📢</span> Herkese Toplu Duyuru Gönder
+                </h4>
+                <span className="text-[10px] text-purple-400 bg-purple-500/10 px-2 py-0.5 rounded border border-purple-500/20">UltiChat İmzalı</span>
+              </div>
+              <form onSubmit={handleAdminBroadcast} className="flex gap-2">
+                <input
+                  type="text"
+                  placeholder="Tüm kullanıcılara aynı anda iletilecek duyuru metni..."
+                  value={broadcastText}
+                  onChange={(e) => setBroadcastText(e.target.value)}
+                  className="flex-1 p-2.5 bg-gray-900 text-xs rounded-lg border border-purple-500/40 text-white focus:outline-none focus:border-purple-400"
+                  disabled={sendingBroadcast}
+                />
+                <button
+                  type="submit"
+                  disabled={sendingBroadcast || !broadcastText.trim()}
+                  className="bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white px-4 py-2.5 rounded-lg text-xs font-bold transition active:scale-95"
+                >
+                  {sendingBroadcast ? 'Gönderiliyor...' : 'Yayınla 🚀'}
+                </button>
+              </form>
+            </div>
+
+            {/* KULLANICI LİSTESİ VE ROLLER */}
+            <div className="space-y-2">
+              <h4 className="font-bold text-xs text-gray-400 uppercase tracking-wider">Kullanıcı Yönetimi ({allUsersList.length})</h4>
+              <div className="max-h-56 overflow-y-auto space-y-2 divide-y divide-gray-800/60 pr-1">
+                {allUsersList.map((u) => (
+                  <div key={u.id} className="flex items-center justify-between pt-2">
+                    <div className="flex items-center gap-2.5">
+                      <div className="w-8 h-8 rounded-full bg-gray-800 border border-gray-700 overflow-hidden flex items-center justify-center font-bold text-xs text-blue-400">
+                        {userAvatars[u.user_name] ? <img src={userAvatars[u.user_name]} alt={u.user_name} className="w-full h-full object-cover" /> : u.user_name[0]?.toUpperCase()}
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-1.5">
+                          <span className="font-semibold text-xs sm:text-sm text-gray-200">{u.user_name}</span>
+                          {renderRoleBadge(u.user_name, u.role)}
+                        </div>
+                        <span className="text-[10px] text-gray-500 block">{u.email}</span>
+                      </div>
                     </div>
-                    <div>
-                      <span className="font-semibold text-xs sm:text-sm text-gray-200 block">{member}</span>
-                      {member === activeGroup.created_by && (
-                        <span className="text-[9px] text-amber-400 bg-amber-400/10 px-1.5 py-0.5 rounded border border-amber-400/20">👑 Kurucu</span>
+
+                    {u.user_name !== 'UltiChat' && u.user_name !== userName && (
+                      <div className="flex items-center gap-2">
+                        <select
+                          value={u.role || 'user'}
+                          onChange={(e) => changeUserRole(u.user_name, e.target.value as UserRole)}
+                          className="bg-gray-800 border border-gray-700 text-xs rounded p-1.5 text-gray-200 focus:outline-none focus:border-red-500"
+                        >
+                          <option value="user">User</option>
+                          <option value="moderator">Moderatör</option>
+                          <option value="admin">Admin</option>
+                        </select>
+
+                        <button
+                          onClick={() => deleteUserByAdmin(u.id, u.user_name)}
+                          className="bg-red-600/20 hover:bg-red-600 border border-red-500/40 text-red-400 hover:text-white px-2.5 py-1.5 rounded text-xs transition font-semibold"
+                          title="Kullanıcıyı Sil"
+                        >
+                          🗑️ Banla
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <button onClick={() => setShowAdminModal(false)} className="w-full bg-gray-800 hover:bg-gray-700 text-white py-2.5 rounded-xl text-xs font-semibold transition mt-2">
+              Paneli Kapat
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ÜYE LİSTESİ MODALI */}
+      {showMembersModal && activeGroup && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-gray-900 border border-gray-800 rounded-2xl w-full max-w-md p-5 sm:p-6 space-y-4 shadow-2xl">
+            <div className="flex justify-between items-center border-b border-gray-800 pb-3">
+              <h3 className="font-bold text-base sm:text-lg text-blue-400">👥 {activeGroup.name} Üyeleri</h3>
+              <button onClick={() => setShowMembersModal(false)} className="text-gray-400 hover:text-white text-xl font-bold p-1">✕</button>
+            </div>
+
+            <div className="max-h-64 overflow-y-auto space-y-3 divide-y divide-gray-800/50">
+              {groupMembers.map((member) => {
+                const memberRole = userRolesMap[member] || 'user'
+
+                return (
+                  <div key={member} className="flex items-center justify-between pt-2">
+                    <div className="flex items-center gap-3">
+                      <div className="relative">
+                        <div className="w-8 h-8 rounded-full bg-gray-800 border border-gray-700 overflow-hidden flex items-center justify-center font-bold text-xs text-blue-400">
+                          {userAvatars[member] ? <img src={userAvatars[member]} alt={member} className="w-full h-full object-cover" /> : member[0]?.toUpperCase()}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-1.5">
+                          <span className="font-semibold text-xs sm:text-sm text-gray-200 block">{member}</span>
+                          {renderRoleBadge(member, memberRole)}
+                        </div>
+                        {member === activeGroup.created_by && (
+                          <span className="text-[9px] text-amber-400 bg-amber-400/10 px-1.5 py-0.5 rounded border border-amber-400/20">👑 Kurucu</span>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      {isAdmin && member !== userName && member !== 'UltiChat' && (
+                        <select
+                          value={memberRole}
+                          onChange={(e) => changeUserRole(member, e.target.value as UserRole)}
+                          className="bg-gray-800 border border-gray-700 text-[10px] rounded p-1 text-gray-300 focus:outline-none"
+                        >
+                          <option value="user">User</option>
+                          <option value="moderator">Mod</option>
+                          <option value="admin">Admin</option>
+                        </select>
+                      )}
+
+                      {canManageGroup && member !== userName && member !== 'UltiChat' && (
+                        <button onClick={() => removeMemberFromGroup(member)} className="bg-red-500/10 hover:bg-red-600 border border-red-500/30 text-red-400 hover:text-white px-2 py-1 rounded text-xs transition font-semibold">
+                          Çıkar ❌
+                        </button>
                       )}
                     </div>
                   </div>
-
-                  {activeGroup.created_by === userName && member !== userName && (
-                    <button
-                      onClick={() => removeMemberFromGroup(member)}
-                      className="bg-red-500/10 hover:bg-red-600 border border-red-500/30 text-red-400 hover:text-white px-2.5 py-1 rounded text-xs transition font-semibold"
-                    >
-                      Çıkar ❌
-                    </button>
-                  )}
-                </div>
-              ))}
+                )
+              })}
             </div>
 
-            <button 
-              onClick={() => setShowMembersModal(false)}
-              className="w-full bg-gray-800 hover:bg-gray-700 text-white py-2.5 rounded-xl text-xs font-semibold transition mt-2"
-            >
+            <button onClick={() => setShowMembersModal(false)} className="w-full bg-gray-800 hover:bg-gray-700 text-white py-2.5 rounded-xl text-xs font-semibold transition mt-2">
               Kapat
             </button>
           </div>
@@ -592,18 +854,17 @@ export default function ChatApp() {
       )}
 
       {/* SOL PANEL */}
-      <aside className={`bg-gray-900 border-r border-gray-800 flex-col ${
-        isMobileDevice 
-          ? (hasActiveChat ? 'hidden' : 'w-full flex') 
-          : 'w-80 flex'
-      }`}>
+      <aside className={`bg-gray-900 border-r border-gray-800 flex-col ${isMobileDevice ? (hasActiveChat ? 'hidden' : 'w-full flex') : 'w-80 flex'}`}>
         <div className="p-3.5 sm:p-4 border-b border-gray-800 flex justify-between items-center bg-gray-900/50">
           <div className="flex items-center gap-3">
             <div className="relative group w-9 h-9 sm:w-10 sm:h-10 rounded-full overflow-hidden bg-blue-600/30 border border-blue-500/50 flex items-center justify-center font-bold text-blue-400">
               {myAvatar ? <img src={myAvatar} alt="Avatar" className="w-full h-full object-cover" /> : userName[0]?.toUpperCase()}
             </div>
             <div>
-              <span className="font-bold text-xs sm:text-sm text-gray-200 block">{userName}</span>
+              <div className="flex items-center gap-1.5">
+                <span className="font-bold text-xs sm:text-sm text-gray-200 block">{userName}</span>
+                {renderRoleBadge(userName, userRole)}
+              </div>
               <label className="text-[10px] text-blue-400 hover:underline cursor-pointer">
                 {uploading ? 'Yükleniyor...' : 'Fotoğraf Değiştir'}
                 <input type="file" accept="image/*" onChange={handleAvatarUpload} className="hidden" disabled={uploading} />
@@ -611,13 +872,22 @@ export default function ChatApp() {
             </div>
           </div>
 
-          <button
-            onClick={handleLogout}
-            title="Çıkış Yap"
-            className="bg-red-500/10 active:bg-red-600/30 hover:bg-red-600/20 border border-red-500/30 text-red-400 hover:text-red-300 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition"
-          >
-            🚪 Çıkış
-          </button>
+          <div className="flex items-center gap-1.5">
+            {/* ADMIN PANELİ AÇMA BUTONU */}
+            {isAdmin && (
+              <button
+                onClick={() => setShowAdminModal(true)}
+                title="Admin Paneli"
+                className="bg-red-500/20 hover:bg-red-600 border border-red-500/40 text-red-300 hover:text-white px-2 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1"
+              >
+                ⚡ Paneller
+              </button>
+            )}
+
+            <button onClick={handleLogout} title="Çıkış Yap" className="bg-red-500/10 active:bg-red-600/30 hover:bg-red-600/20 border border-red-500/30 text-red-400 hover:text-red-300 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition">
+              🚪 Çıkış
+            </button>
+          </div>
         </div>
 
         {/* Tab Geçişleri */}
@@ -637,11 +907,16 @@ export default function ChatApp() {
               <p className="p-4 text-xs text-gray-500 text-center">Henüz arkadaşın yok. "İstekler" kısmından ekle!</p>
             ) : (
               friends.map((friend) => (
-                <button key={friend} onClick={() => setActiveDM(friend)} className={`w-full p-3.5 text-left transition flex items-center gap-3 active:bg-blue-600/30 ${activeDM === friend ? 'bg-blue-600/20 border-l-4 border-blue-500' : 'hover:bg-gray-800/50'}`}>
-                  <div className="w-9 h-9 rounded-full bg-gray-800 border border-gray-700 overflow-hidden flex items-center justify-center font-bold text-xs text-blue-400">
-                    {userAvatars[friend] ? <img src={userAvatars[friend]} alt={friend} className="w-full h-full object-cover" /> : friend[0]?.toUpperCase()}
+                <button key={friend} onClick={() => setActiveDM(friend)} className={`w-full p-3.5 text-left transition flex items-center justify-between active:bg-blue-600/30 ${activeDM === friend ? 'bg-blue-600/20 border-l-4 border-blue-500' : 'hover:bg-gray-800/50'}`}>
+                  <div className="flex items-center gap-3">
+                    <div className="w-9 h-9 rounded-full bg-gray-800 border border-gray-700 overflow-hidden flex items-center justify-center font-bold text-xs text-blue-400">
+                      {userAvatars[friend] ? <img src={userAvatars[friend]} alt={friend} className="w-full h-full object-cover" /> : friend[0]?.toUpperCase()}
+                    </div>
+                    <div className="flex flex-col items-start">
+                      <span className="font-semibold text-sm text-gray-200">{friend}</span>
+                      {renderRoleBadge(friend, userRolesMap[friend])}
+                    </div>
                   </div>
-                  <span className="font-semibold text-sm text-gray-200">{friend}</span>
                 </button>
               ))
             )}
@@ -684,7 +959,10 @@ export default function ChatApp() {
               <h3 className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">Gelen İstekler ({incomingRequests.length})</h3>
               {incomingRequests.map((req) => (
                 <div key={req.id} className="p-3 bg-gray-800/60 rounded-xl border border-gray-700/50 flex items-center justify-between">
-                  <span className="text-xs sm:text-sm font-semibold text-gray-200">{req.sender_name}</span>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs sm:text-sm font-semibold text-gray-200">{req.sender_name}</span>
+                    {renderRoleBadge(req.sender_name, userRolesMap[req.sender_name])}
+                  </div>
                   <div className="flex gap-2">
                     <button onClick={() => handleRequest(req.id, 'accepted')} className="bg-green-600 hover:bg-green-500 px-3 py-1.5 text-xs rounded-lg font-semibold active:scale-95 transition">Kabul</button>
                     <button onClick={() => handleRequest(req.id, 'rejected')} className="bg-red-600 hover:bg-red-500 px-3 py-1.5 text-xs rounded-lg font-semibold active:scale-95 transition">Reddet</button>
@@ -697,21 +975,13 @@ export default function ChatApp() {
       </aside>
 
       {/* SAĞ PANEL: Sohbet */}
-      <section className={`bg-gray-950 flex-col ${
-        isMobileDevice 
-          ? (hasActiveChat ? 'w-full flex' : 'hidden') 
-          : 'flex-1 flex'
-      }`}>
+      <section className={`bg-gray-950 flex-col ${isMobileDevice ? (hasActiveChat ? 'w-full flex' : 'hidden') : 'flex-1 flex'}`}>
         {hasActiveChat ? (
           <>
             <header className="p-3.5 sm:p-4 border-b border-gray-800 bg-gray-900/80 backdrop-blur-md flex justify-between items-center">
               <div className="flex items-center gap-2.5 sm:gap-3">
                 {isMobileDevice && (
-                  <button 
-                    onClick={closeActiveChat}
-                    className="p-1.5 text-gray-400 hover:text-white active:bg-gray-800 rounded-lg transition"
-                    title="Listeye Dön"
-                  >
+                  <button onClick={closeActiveChat} className="p-1.5 text-gray-400 hover:text-white active:bg-gray-800 rounded-lg transition" title="Listeye Dön">
                     <span className="text-xl font-bold">←</span>
                   </button>
                 )}
@@ -724,45 +994,35 @@ export default function ChatApp() {
                   <span className="text-lg sm:text-xl">📢</span>
                 )}
                 <div>
-                  <h2 className="font-bold text-xs sm:text-sm text-gray-100">{activeTab === 'dms' ? activeDM : activeGroup?.name}</h2>
-                  <p className="text-[10px] text-gray-400">{activeTab === 'dms' ? 'Özel DM' : `Kurucu: ${activeGroup?.created_by}`}</p>
+                  <div className="flex items-center gap-1.5">
+                    <h2 className="font-bold text-xs sm:text-sm text-gray-100">{activeTab === 'dms' ? activeDM : activeGroup?.name}</h2>
+                    {activeTab === 'dms' && activeDM && renderRoleBadge(activeDM, userRolesMap[activeDM])}
+                  </div>
+                  <p className="text-[10px] text-gray-400">{activeTab === 'dms' ? (activeDM === 'UltiChat' ? 'Resmi Duyuru Kanalı' : 'Özel DM') : `Kurucu: ${activeGroup?.created_by}`}</p>
                 </div>
               </div>
 
               {/* GRUP KONTROLLERİ */}
               {activeTab === 'groups' && activeGroup && (
                 <div className="flex items-center gap-1.5 sm:gap-2">
-                  <button 
-                    onClick={() => setShowMembersModal(true)} 
-                    className="bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-200 px-2.5 sm:px-3 py-1.5 text-[11px] sm:text-xs rounded-lg font-semibold transition flex items-center gap-1"
-                  >
+                  <button onClick={() => setShowMembersModal(true)} className="bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-200 px-2.5 sm:px-3 py-1.5 text-[11px] sm:text-xs rounded-lg font-semibold transition flex items-center gap-1">
                     👥 ({groupMembers.length})
                   </button>
 
-                  {activeGroup.created_by === userName && (
+                  {canManageGroup && (
                     <>
-                      <select 
-                        value={selectedFriendToInvite} 
-                        onChange={(e) => setSelectedFriendToInvite(e.target.value)} 
-                        className="bg-gray-800 border border-gray-700 text-[11px] sm:text-xs rounded-lg p-1.5 text-white focus:outline-none max-w-[100px] sm:max-w-none"
-                      >
+                      <select value={selectedFriendToInvite} onChange={(e) => setSelectedFriendToInvite(e.target.value)} className="bg-gray-800 border border-gray-700 text-[11px] sm:text-xs rounded-lg p-1.5 text-white focus:outline-none max-w-[100px] sm:max-w-none">
                         <option value="">-- Ekle --</option>
-                        {friends
-                          .filter(f => !groupMembers.includes(f))
-                          .map(f => (
-                            <option key={f} value={f}>{f}</option>
-                          ))
-                        }
+                        {friends.filter(f => !groupMembers.includes(f)).map(f => (
+                          <option key={f} value={f}>{f}</option>
+                        ))}
                       </select>
-
-                      <button onClick={inviteFriendToGroup} className="bg-blue-600 hover:bg-blue-500 px-2.5 sm:px-3 py-1.5 text-[11px] sm:text-xs rounded-lg font-semibold transition">
-                        Ekle
-                      </button>
-
-                      <button onClick={deleteGroup} className="bg-red-600/20 hover:bg-red-600 border border-red-500/50 text-red-400 hover:text-white px-2 sm:px-3 py-1.5 text-[11px] sm:text-xs rounded-lg font-semibold transition">
-                        🗑️
-                      </button>
+                      <button onClick={inviteFriendToGroup} className="bg-blue-600 hover:bg-blue-500 px-2.5 sm:px-3 py-1.5 text-[11px] sm:text-xs rounded-lg font-semibold transition">Ekle</button>
                     </>
+                  )}
+
+                  {(isGroupOwner || isAdmin) && (
+                    <button onClick={deleteGroup} className="bg-red-600/20 hover:bg-red-600 border border-red-500/50 text-red-400 hover:text-white px-2 sm:px-3 py-1.5 text-[11px] sm:text-xs rounded-lg font-semibold transition">🗑️</button>
                   )}
                 </div>
               )}
@@ -773,6 +1033,7 @@ export default function ChatApp() {
               {messages.map((msg) => {
                 const isMe = msg.sender_name === userName
                 const senderAvatar = userAvatars[msg.sender_name]
+                const senderRole = userRolesMap[msg.sender_name]
 
                 return (
                   <div key={msg.id} className={`flex gap-2 items-end ${isMe ? 'flex-row-reverse' : 'flex-row'}`}>
@@ -781,8 +1042,11 @@ export default function ChatApp() {
                     </div>
 
                     <div className={`flex flex-col ${isMe ? 'items-end' : 'items-start'}`}>
-                      <span className="text-[9px] sm:text-[10px] text-gray-400 mb-0.5 px-1">{msg.sender_name}</span>
-                      <div className={`p-2.5 sm:p-3 rounded-2xl max-w-[78vw] sm:max-w-md text-xs sm:text-sm break-words ${isMe ? 'bg-blue-600 text-white rounded-tr-none' : 'bg-gray-800 text-gray-200 rounded-tl-none border border-gray-700/50'}`}>
+                      <div className="flex items-center gap-1.5 mb-0.5 px-1">
+                        <span className="text-[9px] sm:text-[10px] text-gray-400">{msg.sender_name}</span>
+                        {renderRoleBadge(msg.sender_name, senderRole)}
+                      </div>
+                      <div className={`p-2.5 sm:p-3 rounded-2xl max-w-[78vw] sm:max-w-md text-xs sm:text-sm break-words ${isMe ? 'bg-blue-600 text-white rounded-tr-none' : (msg.sender_name === 'UltiChat' ? 'bg-purple-900/60 border border-purple-500/50 text-purple-100 rounded-tl-none' : 'bg-gray-800 text-gray-200 rounded-tl-none border border-gray-700/50')}`}>
                         {msg.content}
                       </div>
                     </div>
@@ -793,10 +1057,24 @@ export default function ChatApp() {
             </div>
 
             <footer className="p-3 sm:p-4 bg-gray-900 border-t border-gray-800">
-              <form onSubmit={sendMessage} className="flex gap-2">
-                <input type="text" placeholder="Bir mesaj yazın..." value={text} onChange={(e) => setText(e.target.value)} className="flex-1 p-2.5 sm:p-3 bg-gray-800 text-white rounded-xl border border-gray-700 focus:outline-none focus:border-blue-500 text-xs sm:text-sm" />
-                <button type="submit" className="bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white px-4 sm:px-6 py-2.5 sm:py-3 rounded-xl text-xs sm:text-sm font-semibold select-none cursor-pointer active:scale-95 transition">Gönder</button>
-              </form>
+              {!isSystemAccount && activeDM === 'UltiChat' ? (
+                <div className="p-3 bg-purple-950/40 border border-purple-500/30 rounded-xl text-center text-xs text-purple-300 font-semibold">
+                  🔒 UltiChat resmi bir duyuru kanalıdır. Bu hesaba mesaj gönderilemez.
+                </div>
+              ) : (
+                <form onSubmit={sendMessage} className="flex gap-2">
+                  <input
+                    type="text"
+                    placeholder={isSystemAccount ? "📢 Tüm üyelere gönderilecek resmi duyuru..." : "Bir mesaj yazın..."}
+                    value={text}
+                    onChange={(e) => setText(e.target.value)}
+                    className="flex-1 p-2.5 sm:p-3 bg-gray-800 text-white rounded-xl border border-gray-700 focus:outline-none focus:border-blue-500 text-xs sm:text-sm"
+                  />
+                  <button type="submit" className={`${isSystemAccount ? 'bg-purple-600 hover:bg-purple-500' : 'bg-blue-600 hover:bg-blue-500'} text-white px-4 sm:px-6 py-2.5 sm:py-3 rounded-xl text-xs sm:text-sm font-semibold select-none cursor-pointer active:scale-95 transition`}>
+                    {isSystemAccount ? 'Duyur' : 'Gönder'}
+                  </button>
+                </form>
+              )}
             </footer>
           </>
         ) : (
