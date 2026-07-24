@@ -24,13 +24,22 @@ interface Message {
 }
 
 export default function ChatApp() {
-  // Cihaz Tipi Tespiti (User-Agent Kontrolü)
+  // DEV BUILD: Cihaz Tipi ve Ekran Boyutu Tespiti
   const [isMobileDevice, setIsMobileDevice] = useState(false)
+  const [windowWidth, setWindowWidth] = useState<number>(0)
 
   useEffect(() => {
+    // Cihaz tipi kontrolü
     const userAgent = navigator.userAgent || navigator.vendor || (window as any).opera
     const mobileRegex = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i
     setIsMobileDevice(mobileRegex.test(userAgent))
+
+    // Ekran boyutunu güncelleme
+    const handleResize = () => setWindowWidth(window.innerWidth)
+    handleResize() // İlk açılışta al
+
+    window.addEventListener('resize', handleResize)
+    return () => window.removeEventListener('resize', handleResize)
   }, [])
 
   // Auth Durumları
@@ -431,7 +440,6 @@ export default function ChatApp() {
     }
   }
 
-  // Sohbetten Çıkma / Geri Dönme İşlevi (Mobil İçin)
   const closeActiveChat = () => {
     setActiveDM(null)
     setActiveGroup(null)
@@ -442,9 +450,18 @@ export default function ChatApp() {
   // A) GİRİŞ / KAYIT EKRANI
   if (!isJoined) {
     return (
-      <main className="flex h-dvh items-center justify-center bg-gray-950 text-white p-4">
+      <main className="flex h-dvh items-center justify-center bg-gray-950 text-white p-4 relative">
+        {/* DEV BUILD INFO BADGE */}
+        <div className="absolute top-3 left-3 bg-blue-950/80 border border-blue-500/40 text-[10px] px-3 py-1.5 rounded-full font-mono text-blue-300 backdrop-blur-md shadow-lg flex items-center gap-2">
+          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+          <span>DEV BUILD</span>
+          <span>|</span>
+          <span>{isMobileDevice ? '📱 MOBİL' : '💻 MASAÜSTÜ'}</span>
+          <span>|</span>
+          <span>{windowWidth}px</span>
+        </div>
+
         <div className="bg-gray-900 border border-gray-800 p-6 sm:p-8 rounded-2xl shadow-2xl w-full max-w-md space-y-6">
-          
           <div className="text-center space-y-2">
             <h1 className="text-2xl sm:text-3xl font-black text-blue-500 tracking-wider">ULTIMATE CHAT</h1>
             <p className="text-xs sm:text-sm text-gray-400">
@@ -534,7 +551,7 @@ export default function ChatApp() {
     )
   }
 
-  // B) SOHBET EKRANI (Mobil vs Masaüstü Arayüzü)
+  // B) SOHBET EKRANI
   return (
     <main className="flex h-dvh bg-gray-950 text-white overflow-hidden relative">
       
@@ -605,7 +622,13 @@ export default function ChatApp() {
               {myAvatar ? <img src={myAvatar} alt="Avatar" className="w-full h-full object-cover" /> : userName[0]?.toUpperCase()}
             </div>
             <div>
-              <span className="font-bold text-xs sm:text-sm text-gray-200 block">{userName}</span>
+              <div className="flex items-center gap-1.5">
+                <span className="font-bold text-xs sm:text-sm text-gray-200 block">{userName}</span>
+                {/* DEV BADGE (KÜÇÜK) */}
+                <span className="text-[9px] bg-blue-900/60 text-blue-300 border border-blue-700/50 px-1.5 py-0.5 rounded font-mono">
+                  {isMobileDevice ? '📱' : '💻'} {windowWidth}px
+                </span>
+              </div>
               <label className="text-[10px] text-blue-400 hover:underline cursor-pointer">
                 {uploading ? 'Yükleniyor...' : 'Fotoğraf Değiştir'}
                 <input type="file" accept="image/*" onChange={handleAvatarUpload} className="hidden" disabled={uploading} />
@@ -708,8 +731,6 @@ export default function ChatApp() {
           <>
             <header className="p-3.5 sm:p-4 border-b border-gray-800 bg-gray-900/80 backdrop-blur-md flex justify-between items-center">
               <div className="flex items-center gap-2.5 sm:gap-3">
-                
-                {/* MOBİL İÇİN GERİ DÖNÜŞ BUTONU (←) */}
                 {isMobileDevice && (
                   <button 
                     onClick={closeActiveChat}
